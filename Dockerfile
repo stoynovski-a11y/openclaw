@@ -1,4 +1,7 @@
-FROM node:22-bookworm
+# Custom OpenClaw Dockerfile for Railway
+# Adds Python 3 + exchangelib for EWS email integration
+
+FROM node:22-bookworm AS base
 
 # Install Bun (required for build scripts)
 RUN curl -fsSL https://bun.sh/install | bash
@@ -29,20 +32,38 @@ RUN pnpm build
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
 
-ENV NODE_ENV=production
+FROM node:22-bookworm-slim AS production
 
-# Allow non-root user to write temp files during runtime/tests.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv python3-dev \
+    build-essential libxml2-dev libxslt1-dev libkrb5-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/exchangelib-env \
+    && /opt/exchangelib-env/bin/pip install --no-cache-dir exchangelib
+
+ENV PATH="/opt/exchangelib-env/bin:$PATH"
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+COPY --from=base /app/dist ./dist
+COPY --from=base /app/ui/dist ./ui/dist
+COPY --from=base /app/node_modules ./node_modules
+COPY --from=base /app/package.json ./
+COPY --from=base /app/openclaw.mjs ./
+COPY --from=base /app/skills ./skills
+COPY --from=base /app/extensions ./extensions
+
+RUN mkdir -p /data && chown node:node /data
 RUN chown -R node:node /app
-
-# Security hardening: Run as non-root user
-# The node:22-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
 USER node
 
-# Start gateway server with default config.
-# Binds to loopback (127.0.0.1) by default for security.
-#
-# For container platforms requiring external health checks:
-#   1. Set OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD env var
-#   2. Override CMD: ["node","openclaw.mjs","gateway","--allow-unconfigured","--bind","lan"]
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+ENV NODE_ENV=production
+ENV OPENCLAW_STATE_DIR=/data
+ENV PORT=3000
+
+EXPOSE 3000
+
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured", "--port", "3000"]
